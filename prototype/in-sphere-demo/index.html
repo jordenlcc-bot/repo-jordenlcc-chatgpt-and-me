@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dragonfly-360 In-Sphere Demo</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #05060a;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: white;
+    }
+    #ui {
+      position: fixed;
+      left: 18px;
+      right: 18px;
+      bottom: 18px;
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      z-index: 10;
+      pointer-events: auto;
+    }
+    #prompt {
+      border: 1px solid rgba(255,255,255,0.22);
+      border-radius: 14px;
+      padding: 14px 16px;
+      background: rgba(6,8,18,0.72);
+      color: white;
+      outline: none;
+      font-size: 15px;
+      backdrop-filter: blur(12px);
+    }
+    button {
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 14px;
+      padding: 0 16px;
+      background: rgba(255,255,255,0.12);
+      color: white;
+      font-size: 14px;
+      cursor: pointer;
+      backdrop-filter: blur(12px);
+    }
+    button:hover { background: rgba(255,255,255,0.2); }
+    #hud {
+      position: fixed;
+      top: 16px;
+      left: 16px;
+      z-index: 10;
+      max-width: 440px;
+      padding: 12px 14px;
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 16px;
+      background: rgba(6,8,18,0.58);
+      backdrop-filter: blur(12px);
+      font-size: 13px;
+      line-height: 1.45;
+      color: rgba(255,255,255,0.82);
+    }
+    #hud strong { color: white; }
+    #fps {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 10;
+      padding: 9px 12px;
+      border-radius: 14px;
+      background: rgba(6,8,18,0.58);
+      border: 1px solid rgba(255,255,255,0.14);
+      color: rgba(255,255,255,0.8);
+      font-size: 12px;
+      backdrop-filter: blur(12px);
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <strong>Dragonfly-360 / In-Sphere Real-Time Renderer</strong><br>
+    You are inside the sphere. Type prompts like:<br>
+    <span>“red north burst”, “blue south rise”, “equator interference”, “dragonfly compound eye”, “galaxy dome”, “electric field”</span><br>
+    Mouse drag = look around. Wheel = zoom.
+  </div>
+  <div id="fps">FPS: --</div>
+  <div id="ui">
+    <input id="prompt" value="red north burst with equator interference" />
+    <button id="run">React</button>
+    <button id="random">Random</button>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(82, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.position.set(0, 0, 0.1);
+
+    const uniforms = {
+      uTime: { value: 0 },
+      uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+      uColorA: { value: new THREE.Color('#ff275f') },
+      uColorB: { value: new THREE.Color('#00b7ff') },
+      uColorC: { value: new THREE.Color('#ffe36e') },
+      uMode: { value: 0.0 },
+      uSpeed: { value: 0.55 },
+      uDensity: { value: 9.0 },
+      uEquator: { value: 0.55 },
+      uNorth: { value: 0.75 },
+      uSouth: { value: 0.20 },
+      uBlock: { value: 0.25 },
+      uPhase: { value: 0.0 },
+      uBrightness: { value: 1.0 }
+    };
+
+    const vertexShader = `
+      varying vec3 vPos;
+      varying vec3 vNormal;
+      void main() {
+        vPos = position;
+        vNormal = normalize(position);
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `;
+
+    const fragmentShader = `
+      precision highp float;
+      varying vec3 vPos;
+      varying vec3 vNormal;
+
+      uniform float uTime;
+      uniform vec2 uResolution;
+      uniform vec3 uColorA;
+      uniform vec3 uColorB;
+      uniform vec3 uColorC;
+      uniform float uMode;
+      uniform float uSpeed;
+      uniform float uDensity;
+      uniform float uEquator;
+      uniform float uNorth;
+      uniform float uSouth;
+      uniform float uBlock;
+      uniform float uPhase;
+      uniform float uBrightness;
+
+      const float PI = 3.141592653589793;
+
+      float hash(vec2 p) {
+        p = fract(p * vec2(123.34, 456.21));
+        p += dot(p, p + 45.32);
+        return fract(p.x * p.y);
+      }
+
+      float line(float x, float width) {
+        return smoothstep(width, 0.0, abs(x));
+      }
+
+      float band(float x, float center, float width) {
+        return smoothstep(width, 0.0, abs(x - center));
+      }
+
+      vec3 palette(float t) {
+        return mix(mix(uColorA, uColorB, smoothstep(0.0, 1.0, t)), uColorC, 0.28 + 0.28 * sin(6.2831 * t + uPhase));
+      }
+
+      void main() {
+        vec3 n = normalize(vNormal);
+        float lon = atan(n.z, n.x);              // -pi..pi
+        float lat = asin(clamp(n.y, -1.0, 1.0)); // -pi/2..pi/2
+        float u = lon / (2.0 * PI) + 0.5;
+        float v = lat / PI + 0.5;
+
+        float t = uTime * uSpeed;
+
+        // Core spherical structures.
+        float north = smoothstep(0.15, 1.0, n.y);
+        float south = smoothstep(0.15, 1.0, -n.y);
+        float equator = exp(-abs(n.y) * 12.0) * uEquator;
+
+        // Riemann-like radial relation: equator expands, poles compact.
+        float riemannRadius = tan((v) * PI * 0.49);
+        riemannRadius = clamp(riemannRadius, 0.0, 12.0);
+
+        // Phase waves: north/south/equator interact.
+        float waveN = sin(uDensity * lon + 7.0 * lat - t * 3.2 + uPhase);
+        float waveS = sin(uDensity * lon - 9.0 * lat + t * 2.5 - uPhase);
+        float interference = 0.5 + 0.5 * cos((waveN - waveS) * PI + t);
+        float gate = smoothstep(0.15, 0.95, interference);
+
+        // Compound eye blocks.
+        vec2 grid = vec2(floor(u * 44.0), floor(v * 22.0));
+        float cell = hash(grid);
+        float cellPulse = 0.5 + 0.5 * sin(t * 4.0 + cell * 9.0 + lon * 4.0);
+        float blockMask = smoothstep(0.72, 1.0, cellPulse) * uBlock;
+
+        // Mode-specific patterns.
+        float modeWave = 0.0;
+        if (uMode < 0.5) {
+          // Polar burst: north/south expansion.
+          modeWave = uNorth * north * sin(18.0 * lat - t * 5.0) + uSouth * south * sin(18.0 * lat + t * 5.0);
+        } else if (uMode < 1.5) {
+          // Equator interference belt.
+          modeWave = equator * (0.5 + 0.5 * sin(28.0 * lon + t * 7.0));
+        } else if (uMode < 2.5) {
+          // Dragonfly compound-eye sampling.
+          modeWave = blockMask + 0.35 * sin(36.0 * u + 18.0 * v - t * 4.0);
+        } else if (uMode < 3.5) {
+          // Galaxy dome spiral.
+          float spiral = sin(12.0 * lon + 22.0 * lat + 5.0 * sin(lat * 4.0) - t * 2.0);
+          modeWave = 0.6 * spiral + 0.35 * equator + 0.3 * blockMask;
+        } else {
+          // Electric / polarization grid.
+          float meridians = line(sin(lon * 16.0 + t * 1.5), 0.08);
+          float parallels = line(sin(lat * 20.0 - t * 1.2), 0.08);
+          modeWave = meridians * 0.55 + parallels * 0.45 + gate * 0.5;
+        }
+
+        float intensity = 0.18;
+        intensity += 0.55 * gate;
+        intensity += 0.45 * equator;
+        intensity += 0.38 * abs(modeWave);
+        intensity += 0.25 * blockMask;
+        intensity += 0.18 * pow(north * uNorth + south * uSouth, 1.6);
+        intensity *= uBrightness;
+
+        vec3 col = palette(fract(u + 0.18 * sin(lat * 3.0 + t) + 0.1 * modeWave));
+        col *= intensity;
+
+        // Interior depth haze.
+        float vignette = 0.82 + 0.18 * pow(abs(n.y), 0.5);
+        col *= vignette;
+
+        // Soft stars / particles.
+        float star = step(0.992, hash(floor(vec2(u * 180.0, v * 90.0)))) * (0.5 + 0.5 * sin(t * 2.0 + cell * 8.0));
+        col += vec3(star) * 0.65;
+
+        gl_FragColor = vec4(col, 1.0);
+      }
+    `;
+
+    const geometry = new THREE.SphereGeometry(600, 128, 64);
+    geometry.scale(-1, 1, 1); // camera is inside; render inward surface
+    const material = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader,
+      fragmentShader,
+      side: THREE.BackSide,
+      depthWrite: false
+    });
+    const sphere = new THREE.Mesh(geometry, material);
+    scene.add(sphere);
+
+    // Subtle center axes / orientation markers as tiny glowing rings.
+    const ringMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.12, side: THREE.DoubleSide });
+    const equatorRing = new THREE.Mesh(new THREE.RingGeometry(598, 600, 192), ringMaterial);
+    equatorRing.rotation.x = Math.PI / 2;
+    scene.add(equatorRing);
+
+    let yaw = 0;
+    let pitch = 0;
+    let dragging = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    renderer.domElement.addEventListener('pointerdown', (e) => {
+      dragging = true;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      renderer.domElement.setPointerCapture(e.pointerId);
+    });
+    renderer.domElement.addEventListener('pointerup', () => { dragging = false; });
+    renderer.domElement.addEventListener('pointermove', (e) => {
+      if (!dragging) return;
+      const dx = e.clientX - lastX;
+      const dy = e.clientY - lastY;
+      lastX = e.clientX;
+      lastY = e.clientY;
+      yaw -= dx * 0.004;
+      pitch -= dy * 0.004;
+      pitch = Math.max(-Math.PI * 0.48, Math.min(Math.PI * 0.48, pitch));
+    });
+    renderer.domElement.addEventListener('wheel', (e) => {
+      camera.fov = Math.max(55, Math.min(105, camera.fov + e.deltaY * 0.02));
+      camera.updateProjectionMatrix();
+    });
+
+    const promptEl = document.getElementById('prompt');
+    const fpsEl = document.getElementById('fps');
+
+    const presets = [
+      'red north burst with equator interference',
+      'blue south rise slow polarization waves',
+      'dragonfly compound eye block flicker',
+      'galaxy dome purple spiral low speed',
+      'electric field grid high density',
+      'green equator interference belt fast',
+      'gold north south vertical contraction'
+    ];
+
+    function setColor(hexA, hexB, hexC) {
+      uniforms.uColorA.value.set(hexA);
+      uniforms.uColorB.value.set(hexB);
+      uniforms.uColorC.value.set(hexC);
+    }
+
+    function applyPrompt(raw) {
+      const p = raw.toLowerCase();
+
+      // Defaults.
+      uniforms.uSpeed.value = 0.55;
+      uniforms.uDensity.value = 9.0;
+      uniforms.uEquator.value = 0.55;
+      uniforms.uNorth.value = 0.7;
+      uniforms.uSouth.value = 0.25;
+      uniforms.uBlock.value = 0.2;
+      uniforms.uBrightness.value = 1.0;
+      uniforms.uPhase.value = Math.random() * Math.PI * 2;
+      uniforms.uMode.value = 0.0;
+      setColor('#ff275f', '#00b7ff', '#ffe36e');
+
+      if (p.includes('blue') || p.includes('蓝')) setColor('#1d6bff', '#00f0ff', '#b8f7ff');
+      if (p.includes('red') || p.includes('红')) setColor('#ff204f', '#ff6b00', '#ffe36e');
+      if (p.includes('green') || p.includes('绿')) setColor('#00ff99', '#2a7fff', '#d7ff64');
+      if (p.includes('purple') || p.includes('violet') || p.includes('紫')) setColor('#9d5cff', '#00d5ff', '#ff5cf4');
+      if (p.includes('gold') || p.includes('金')) setColor('#ffd166', '#ff6b35', '#fff3b0');
+      if (p.includes('white') || p.includes('白')) setColor('#ffffff', '#b7e4ff', '#ffe9b7');
+
+      if (p.includes('equator') || p.includes('赤道') || p.includes('interference') || p.includes('干涉')) {
+        uniforms.uMode.value = 1.0;
+        uniforms.uEquator.value = 1.25;
+        uniforms.uDensity.value = 14.0;
+      }
+      if (p.includes('dragonfly') || p.includes('compound') || p.includes('复眼') || p.includes('蜻蜓') || p.includes('block')) {
+        uniforms.uMode.value = 2.0;
+        uniforms.uBlock.value = 1.0;
+        uniforms.uDensity.value = 18.0;
+      }
+      if (p.includes('galaxy') || p.includes('银河') || p.includes('星')) {
+        uniforms.uMode.value = 3.0;
+        uniforms.uSpeed.value = 0.28;
+        uniforms.uDensity.value = 11.0;
+      }
+      if (p.includes('electric') || p.includes('field') || p.includes('电') || p.includes('polarization') || p.includes('偏振')) {
+        uniforms.uMode.value = 4.0;
+        uniforms.uDensity.value = 16.0;
+        uniforms.uEquator.value = 0.85;
+      }
+      if (p.includes('north') || p.includes('北')) {
+        uniforms.uNorth.value = 1.25;
+        uniforms.uSouth.value = 0.1;
+      }
+      if (p.includes('south') || p.includes('南')) {
+        uniforms.uSouth.value = 1.25;
+        uniforms.uNorth.value = 0.15;
+      }
+      if (p.includes('vertical') || p.includes('contraction') || p.includes('垂直') || p.includes('收缩')) {
+        uniforms.uNorth.value = 1.05;
+        uniforms.uSouth.value = 1.05;
+        uniforms.uEquator.value = 0.95;
+        uniforms.uDensity.value = 12.0;
+      }
+      if (p.includes('fast') || p.includes('快')) uniforms.uSpeed.value = 1.2;
+      if (p.includes('slow') || p.includes('慢')) uniforms.uSpeed.value = 0.22;
+      if (p.includes('dense') || p.includes('high density') || p.includes('密')) uniforms.uDensity.value = 22.0;
+      if (p.includes('calm') || p.includes('soft') || p.includes('柔')) uniforms.uBrightness.value = 0.72;
+      if (p.includes('bright') || p.includes('亮')) uniforms.uBrightness.value = 1.45;
+    }
+
+    document.getElementById('run').addEventListener('click', () => applyPrompt(promptEl.value));
+    promptEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyPrompt(promptEl.value);
+    });
+    document.getElementById('random').addEventListener('click', () => {
+      const next = presets[Math.floor(Math.random() * presets.length)];
+      promptEl.value = next;
+      applyPrompt(next);
+    });
+
+    applyPrompt(promptEl.value);
+
+    let last = performance.now();
+    let frames = 0;
+    let fpsLast = last;
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      uniforms.uTime.value += dt;
+
+      camera.rotation.order = 'YXZ';
+      camera.rotation.y = yaw;
+      camera.rotation.x = pitch;
+
+      renderer.render(scene, camera);
+
+      frames++;
+      if (now - fpsLast > 500) {
+        const fps = Math.round(frames * 1000 / (now - fpsLast));
+        fpsEl.textContent = `FPS: ${fps}`;
+        frames = 0;
+        fpsLast = now;
+      }
+    }
+    requestAnimationFrame(animate);
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
